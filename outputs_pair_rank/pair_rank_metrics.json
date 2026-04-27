@@ -1,0 +1,20 @@
+{
+  "mse": 12.851411819458008,
+  "mae": 2.8035366535186768,
+  "spearman": 0.5223017403302287,
+  "top_100_model_value": 891.0,
+  "top_100_oracle_value": 1401.0,
+  "top_100_random_expected_value": 451.5999755859375,
+  "top_100_regret": 510.0,
+  "top_100_oracle_overlap": 0.12,
+  "top_500_model_value": 3454.0,
+  "top_500_oracle_value": 5216.0,
+  "top_500_random_expected_value": 2258.0,
+  "top_500_regret": 1762.0,
+  "top_500_oracle_overlap": 0.454,
+  "top_1000_model_value": 6083.0,
+  "top_1000_oracle_value": 7939.0,
+  "top_1000_random_expected_value": 4516.0,
+  "top_1000_regret": 1856.0,
+  "top_1000_oracle_overlap": 0.67
+}
