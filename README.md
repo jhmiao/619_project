@@ -1,177 +1,212 @@
-# PTO Fitbit Wear Simulation Project
+# Incentive Allocation: PTO and DFL
 
-This project simulates Fitbit wear behavior and compares ranking policies for deciding which users should receive an intervention. The main target is the treatment effect of action `1` versus action `0`: the difference in total wear days over the next 30 days.
+This project simulates a treatment allocation problem and compares two neural
+approaches:
 
-## Data Format
+- **PTO**, predict-then-optimize: learn an outcome model first, then solve a
+  top-budget allocation problem using predicted treatment effects.
+- **DFL**, decision-focused learning: train the same outcome architecture through
+  a differentiable surrogate of the downstream allocation objective.
 
-Most generated CSVs use one row per user:
-
-```text
-user_id, group, action, day_1, ..., day_30, p01_0, p11_0, tau01, tau11, p01_1, p11_1
-```
-
-`day_i` is a binary wear indicator:
-
-- `0`: below wear threshold
-- `1`: above wear threshold
-
-The PTO training file uses:
-
-```text
-user_id, day_1, ..., day_30, target
-```
-
-where:
-
-```text
-target = sum(next-month days under action=1) - sum(next-month days under action=0)
-```
-
-## Scripts
-
-### `generate_data.py`
-
-Generates synthetic Fitbit wear data from latent user groups. Each user is assigned a group and person-level transition parameters:
-
-- `p01_0`: probability of moving from not-wear to wear without action
-- `p11_0`: probability of staying in wear without action
-- `tau01`: action lift for `0 -> 1`
-- `tau11`: action lift for `1 -> 1`
-- `p01_1`: action transition probability for `0 -> 1`
-- `p11_1`: action transition probability for `1 -> 1`
-
-Important functions:
-
-- `generate_dataset(...)`: creates the first month of simulated data.
-- `generate_next_month(...)`: reads a CSV with a `day_31` state and simulates the next 30 days under a chosen action.
-
-Running the script writes `synthetic_fitbit_wear.csv`.
-
-### `pto_training_data.py`
-
-Builds the supervised learning dataset for PTO training.
-
-It reads:
-
-- `synthetic_fitbit_wear_test.csv`
-- `synthetic_fitbit_wear_next_month_0_test.csv`
-- `synthetic_fitbit_wear_next_month_1_test.csv`
-
-For each `user_id`, it computes:
-
-```text
-target = action_1_next_month_day_sum - action_0_next_month_day_sum
-```
-
-It writes `pto_training_data_test.csv`.
-
-### `train_pto.py`
-
-Trains a predict-then-optimize style neural network to predict `target` from the 30-day wear history.
-
-Model architecture:
-
-```text
-30 inputs -> Linear(32) -> ReLU -> Linear(16) -> ReLU -> Linear(1)
-```
-
-It performs K-fold cross-validation, trains a final model, and saves:
-
-- `pto_model.pt`
-- `pto_cv_results.csv`
-
-### `train_pair_rank.py`
-
-Trains a pairwise ranking model using the same neural network architecture as `train_pto.py`, but with a RankNet-style pairwise loss.
-
-The model learns a scalar score intended to rank users by treatment effect, rather than directly minimizing prediction error.
-
-It saves artifacts under `outputs_pair_rank/`, including:
-
-- `pair_rank_model.pt`
-- `pair_rank_scaler.npz`
-- `pair_rank_metrics.json`
-- `pair_rank_training_predictions.csv`
-- `pair_rank_cv_results.csv`
-
-### `evaluate.py`
-
-Evaluates either model type on PTO-format data.
-
-It supports:
-
-- PTO model checkpoints such as `pto_model.pt`
-- Pair-rank checkpoints such as `outputs_pair_rank/pair_rank_model.pt`
-
-For PTO models, it writes predictions with column:
-
-```text
-pto_pred
-```
-
-For pair-rank models, it writes scores with column:
-
-```text
-pair_rank_score
-```
-
-Example commands:
+The intended pipeline is:
 
 ```bash
-python evaluate.py --model-path pto_model.pt --output-path pto_results.csv
-python evaluate.py --model-path outputs_pair_rank/pair_rank_model.pt --output-path pair_rank_results.csv
+python src/generate_data.py
+python src/train_pto.py
+python src/train_dfl.py
+python src/evaluate.py
 ```
 
-Pair-rank evaluation also loads the saved scaler from `outputs_pair_rank/pair_rank_scaler.npz`.
+Run these commands from the `project/` directory.
 
-### `compare_results.py`
+## Data Generation
 
-Compares ranking policies against an oracle ranking.
+`src/generate_data.py` creates a simulated user population and writes:
 
-It reads:
+- `data/train.csv`
+- `data/val.csv`
+- `data/test.csv`
 
-- `results_test.csv` or PTO results with `pto_pred`
-- `pair_rank_results.csv` with `pair_rank_score`
+Each user has:
 
-For every top `K`, it computes:
+- group label `A` or `B`
+- five covariates `x1` through `x5`
+- 30 pre-intervention binary wear indicators `pre_1` through `pre_30`
+- randomized observed treatment `A_obs`
+- observed outcome `Y_obs`
+- true potential outcomes `Y0_true` and `Y1_true`
+
+The post-intervention outcomes are generated from binary Markov chains. The
+baseline transition probabilities are heterogeneous by covariates and group, and
+treatment changes those transition probabilities through user-specific response
+parameters. The outcome `Y` is the average post-intervention wear rate, so
+`Y0_true` is the no-action outcome and `Y1_true` is the action outcome.
+
+## Model
+
+`src/models.py` defines the shared neural network structure used by PTO and DFL.
+The input feature vector is:
 
 ```text
-regret = oracle top-K target sum - model top-K target sum
+[group_B, x1, ..., x5, pre_1, ..., pre_30, A_obs]
 ```
 
-It compares:
+This gives an input dimension of 37.
 
-- PTO ranking
-- Pair-rank ranking
-- Random baseline
+The shared architecture is a two-hidden-layer MLP:
 
-It writes:
-
-- `compare_results_curve.csv`
-- `compare_results.png`
-
-## Typical Workflow
-
-From the `project/` directory:
-
-```bash
-python generate_data.py
-python pto_training_data.py
-
-python train_pto.py
-python train_pair_rank.py
-
-python evaluate.py --model-path pto_model.pt --output-path pto_results.csv
-python evaluate.py --model-path outputs_pair_rank/pair_rank_model.pt --output-path pair_rank_results.csv
-
-python compare_results.py
+```text
+Linear(input_dim, hidden_dim)
+ReLU
+Dropout
+Linear(hidden_dim, hidden_dim)
+ReLU
+Dropout
+Linear(hidden_dim, 1)
 ```
 
-The final comparison plot is `compare_results.png`.
+`OutcomeNet` adds a final sigmoid and is used by PTO. `OutcomeNetNoSigmoid` uses
+the same structure without the final sigmoid and is used by DFL; DFL applies
+`torch.sigmoid` explicitly during training and evaluation.
 
-## Notes
+## PTO: Predict Then Optimize
 
-- The simulation is synthetic and uses Markov transition probabilities.
-- Person-level randomization means each user has fixed transition parameters across days, but different users have slightly different parameters.
-- `target` is known only because this is synthetic data and both potential next-month outcomes are simulated.
-- The oracle curve ranks by the true `target`, so it is an upper bound for learned ranking methods.
+`src/train_pto.py` trains `OutcomeNet` to predict the observed outcome `Y_obs`
+from the observed action and user features.
+
+The supervised training objective is mean squared error:
+
+```text
+min_theta (1/n) sum_i (f_theta(x_i, A_obs_i) - Y_obs_i)^2
+```
+
+The script uses K-fold cross-validation to choose a reasonable number of epochs,
+then retrains one final model on all training data. It writes:
+
+- `outputs/pto_model.pt`
+- `outputs/pto_training_summary.csv`
+
+After training, PTO uses the model counterfactually:
+
+```text
+y0_hat_i = f_theta(x_i, A=0)
+y1_hat_i = f_theta(x_i, A=1)
+```
+
+`src/optimize.py` then solves the budgeted allocation problem. For utility
+function `u`, define each user's predicted gain:
+
+```text
+score_i = u(y1_hat_i) - u(y0_hat_i)
+```
+
+The default utility is the threshold success utility:
+
+```text
+u(y) = 1{y > 0.60}
+```
+
+The PTO allocation objective is:
+
+```text
+max_a sum_i a_i [u(y1_hat_i) - u(y0_hat_i)]
+subject to sum_i a_i <= B
+           a_i in {0, 1}
+           a_i = 0 if score_i <= 0  (default require_positive_score=True)
+```
+
+Because the objective is linear in the binary allocation, the optimizer selects
+the top `B` users with positive predicted scores. Ties are broken stably by user
+index.
+
+## DFL: Decision-Focused Learning
+
+`src/train_dfl.py` trains `OutcomeNetNoSigmoid` with a differentiable surrogate
+for the allocation objective.
+
+For each mini-batch, the same model is evaluated twice:
+
+```text
+y0_hat_i = sigmoid(f_theta(x_i, A=0))
+y1_hat_i = sigmoid(f_theta(x_i, A=1))
+```
+
+The hard threshold utility is replaced by a smooth approximation:
+
+```text
+s0_hat_i = sigmoid((y0_hat_i - threshold) / threshold_temperature)
+s1_hat_i = sigmoid((y1_hat_i - threshold) / threshold_temperature)
+score_i = s1_hat_i - s0_hat_i
+```
+
+The hard top-`B` allocation is replaced by a soft batch allocation:
+
+```text
+a_i = batch_budget * softmax(score_i / allocation_temperature)
+batch_budget = max(1, budget_fraction * batch_size)
+```
+
+The differentiable DFL decision objective is:
+
+```text
+max_theta sum_i a_i [s1_hat_i - s0_hat_i]
+```
+
+The implemented loss minimizes the negative mean decision objective plus optional
+regularizers:
+
+```text
+min_theta
+    - (1/m) sum_i a_i [s1_hat_i - s0_hat_i]
+    + mse_weight * (1/m) sum_i (sigmoid(f_theta(x_i, A_obs_i)) - Y_obs_i)^2
+    + fairness_weight * sum_g (r_g - r_overall)^2
+```
+
+Here `m` is the mini-batch size and `r_g` is the predicted soft-policy success
+rate for group `g`. The fairness term is available but defaults to zero.
+
+The DFL script writes:
+
+- `outputs/dfl_model.pt`
+- `outputs/dfl_training_summary.csv`
+
+## Evaluation
+
+`src/evaluate.py` loads the PTO and DFL checkpoints, predicts counterfactual
+outcomes on `data/test.csv`, solves the same top-budget allocation for each
+model, and compares:
+
+- `pto`
+- `dfl`
+- `oracle`
+- `random`
+- `no_action`
+
+The oracle policy uses the true potential outcomes:
+
+```text
+score_i^oracle = u(Y1_true_i) - u(Y0_true_i)
+```
+
+Evaluation reports:
+
+- budget used
+- mean policy outcome
+- policy success rate
+- true continuous gain among selected users
+- true threshold-success gain among selected users
+- group-level counts, selection rates, and success rates
+
+Outputs:
+
+- `outputs/test_allocations.csv`
+- `outputs/test_metrics.csv`
+
+## Main Files
+
+- `src/generate_data.py`: simulate users, potential outcomes, and train/val/test splits
+- `src/models.py`: shared MLP architectures
+- `src/train_pto.py`: supervised outcome-model training for PTO
+- `src/optimize.py`: top-budget allocation utilities
+- `src/train_dfl.py`: decision-focused training objective
+- `src/evaluate.py`: test-set policy comparison

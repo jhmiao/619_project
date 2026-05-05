@@ -1,0 +1,11 @@
+mean_y_policy:     Average wear proportion after applying your policy
+success_rate_policy: * Fraction of users exceeding 60% wear
+true_gain_continuous_selected:     Total true improvement in continuous wear: \sum_i A_i \cdot (Y_i^{(1)} - Y_i^{(0)})
+true_gain_step_selected:     Number of users pushed across the 60% threshold: \sum_i A_i \cdot \left(
+\mathbf{1}\{Y_i^{(1)} > 0.6\}
+-
+\mathbf{1}\{Y_i^{(0)} > 0.6\}
+\right)
+
+
+in train_dfl: because DEFAULT_THRESHOLD_TEMPERATURE = 0.05, the threshold is fairly smooth. Smaller values, like 0.02, make it closer to a hard step but may be less stable.
