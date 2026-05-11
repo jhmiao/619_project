@@ -24,7 +24,12 @@ N_USERS = 10_000
 N_PRE_DAYS = 30
 N_POST_DAYS = 30
 TRAIN_FRAC = 0.70
+
 VAL_FRAC = 0.15
+
+# Standard deviation of latent user-level noise added to transition logits.
+# Larger values make treatment effects harder to predict from observed covariates.
+TRANSITION_NOISE_STD = 0.50
 
 
 def sigmoid(x: np.ndarray) -> np.ndarray:
@@ -57,12 +62,22 @@ def simulate_markov_sequence(
     return seq
 
 
-def build_transition_probabilities(x: np.ndarray, group: np.ndarray) -> pd.DataFrame:
+def build_transition_probabilities(
+    x: np.ndarray,
+    group: np.ndarray,
+    rng: np.random.Generator,
+    noise_std: float = TRANSITION_NOISE_STD,
+) -> pd.DataFrame:
     """
     Map covariates and group membership to baseline and treated transition probabilities.
 
     The coefficients are chosen to create heterogeneous baseline adherence and treatment response.
     Group B is slightly harder at baseline but somewhat more responsive to action.
+
+    In addition, latent Gaussian noise is added to the transition logits so that
+    users with identical observed covariates can still behave differently.
+    This makes the downstream decision problem less deterministic and generally
+    more challenging for PTO.
     """
     group_b = (group == "B").astype(float)
 
@@ -72,17 +87,34 @@ def build_transition_probabilities(x: np.ndarray, group: np.ndarray) -> pd.DataF
     x4 = x[:, 3]
     x5 = x[:, 4]
 
+    n_users = x.shape[0]
+
+    # Latent user-level heterogeneity.
+    # These noises affect the logits before sigmoid transformation.
+    eps_p = rng.normal(loc=0.0, scale=noise_std, size=n_users)
+    eps_q = rng.normal(loc=0.0, scale=noise_std, size=n_users)
+    eps_tau_p = rng.normal(loc=0.0, scale=noise_std, size=n_users)
+    eps_tau_q = rng.normal(loc=0.0, scale=noise_std, size=n_users)
+
     # Baseline persistence probabilities.
-    p = sigmoid(0.70 + 0.85 * x1 - 0.35 * x2 + 0.25 * x3 - 0.45 * group_b)
-    q = sigmoid(0.35 - 0.65 * x1 + 0.45 * x2 - 0.25 * x4 + 0.35 * group_b)
+    p = sigmoid(
+        0.70 + 0.85 * x1 - 0.35 * x2 + 0.25 * x3 - 0.45 * group_b + eps_p
+    )
+    q = sigmoid(
+        0.35 - 0.65 * x1 + 0.45 * x2 - 0.25 * x4 + 0.35 * group_b + eps_q
+    )
 
     # Treatment responsiveness. These are not direct probability increases;
     # they are scaled through p' = p + (1-p) tau_p and q' = q + (1-q) tau_q.
-    tau_p = sigmoid(-1.55 + 0.65 * x2 - 0.30 * x3 + 0.55 * group_b)
-    tau_q = sigmoid(-1.75 + 0.50 * x4 + 0.25 * x5 + 0.45 * group_b)
+    tau_p = sigmoid(
+        -1.55 + 0.65 * x2 - 0.30 * x3 + 0.55 * group_b + eps_tau_p
+    )
+    tau_q = sigmoid(
+        -1.75 + 0.50 * x4 + 0.25 * x5 + 0.45 * group_b + eps_tau_q
+    )
 
     p_treated = p + (1.0 - p) * tau_p
-    q_treated = q + (1.0 - q) * tau_q
+    q_treated = q * (1.0 - tau_q)
 
     return pd.DataFrame(
         {
@@ -104,9 +136,9 @@ def generate_dataset() -> pd.DataFrame:
     # Two groups with unequal sizes to make group-rate fairness meaningful.
     group = rng.choice(["A", "B"], size=N_USERS, p=[0.65, 0.35])
 
-    # Five covariates. x1 is a strong baseline adherence driver; others affect response/noise.
+    # Five covariates.
     x = rng.normal(loc=0.0, scale=1.0, size=(N_USERS, 5))
-    transition_df = build_transition_probabilities(x, group)
+    transition_df = build_transition_probabilities(x, group, rng=rng, noise_std=TRANSITION_NOISE_STD)
 
     rows = []
     for i in range(N_USERS):

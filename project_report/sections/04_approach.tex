@@ -1,0 +1,353 @@
+\section{Approach}
+
+\subsection{Simulation Setup}
+The simulation creates a controlled setting in which the true treatment effects are known. Each user $i$ has a group assignment $G_i$ and covariates $Z_i \in \mathbb{R}^5$. Daily wear is modeled as a two-state Markov chain, where state $1$ means the device is worn and state $0$ means it is not worn. The baseline transition probabilities are
+\begin{align*}
+    p_i &= P_i^{11} = \sigma(f_1(G_i, Z_i)), \\
+    q_i &= P_i^{00} = \sigma(f_2(G_i, Z_i)),
+\end{align*}
+where $p_i$ is the probability of remaining compliant, $q_i$ is the probability of remaining noncompliant, and $\sigma$ is the sigmoid function.
+
+The intervention effect also depends on $G_i$ and $Z_i$:
+\begin{align*}
+    \tau^p_i &= \sigma(g_1(G_i, Z_i)), \\
+    \tau^q_i &= \sigma(g_2(G_i, Z_i)).
+\end{align*}
+Under treatment, the transition probabilities become
+\begin{align*}
+    p'_i &= p_i + (1-p_i)\tau^p_i, \\
+    q'_i &= q_i(1-\tau^q_i).
+\end{align*}
+This parameterization keeps probabilities in $[0,1]$: treatment increases persistence in the compliant state and decreases persistence in the noncompliant state.
+
+For each user, the initial state is sampled from the stationary distribution of the baseline Markov chain. We first simulate a 30-day pre-intervention history $H_i$ using $p_i$ and $q_i$. We then randomize treatment $A_i$ and simulate the next 30 days. Control users follow the baseline transition probabilities, while treated users follow $p'_i$ and $q'_i$. The post-intervention outcome $Y_i \in [0,1]$ is the fraction of compliant days in this second 30-day period. The simulated data are split into training and test sets.
+
+\subsection{Two-Stage Predict-Then-Optimize}
+The predict-then-optimize (PTO) pipeline first trains a predictive model and then solves a downstream optimization problem using the model predictions. The predictive model is trained on the training set with features $(X_i,A_i)$, where $X_i=(G_i,Z_i,H_i)$, and target $Y_i$. At decision time, the model is evaluated twice for each test user, once with $A_i=0$ and once with $A_i=1$. This produces estimated potential outcomes
+\[
+\hat{Y}_i^{(0)}, \qquad \hat{Y}_i^{(1)},
+\]
+which are used to estimate each user's predicted treatment benefit.
+
+The estimated potential outcomes are then plugged into the objective in Equation~\ref{eq:obj}. The ranking setting corresponds to a nudging intervention, where each selected user consumes one unit of outreach capacity. The knapsack setting corresponds to a payment incentive, where each selected user has an estimated expected payment cost.
+
+The PTO objective is
+\begin{multline} \label{eq:obj_pto}
+\max_A
+\quad
+\lambda_1 \sum_i A_i \left(\hat{Y}_i^{(1)} - \hat{Y}_i^{(0)}\right)
++ \lambda_2 \sum_i A_i \left(u(\hat{Y}_i^{(1)}) - u(\hat{Y}_i^{(0)})\right) \\
+- \lambda_3 \sum_{g \in \mathcal{G}} \left(\hat{r}_g - \hat{r}_{\text{overall}}\right)^2 .
+\end{multline}
+For the ranking/nudging setting, the budget constraint is
+\[
+\sum_i A_i \le B.
+\]
+Without the fairness penalty, this reduces to sorting users by predicted objective contribution and selecting the top $B$ users. With the fairness penalty, the problem becomes a mixed-integer quadratic program (MIQP), which can be solved directly with Gurobi for the problem sizes considered here.
+
+For the knapsack/incentive setting, the budget constraint is
+\[
+\sum_i \hat{C}_i A_i \le B,
+\]
+where the estimated payment cost is
+\[
+\hat{C}_i
+=
+\alpha \hat{Y}_i^{(1)}\mathbf{1}\{\hat{Y}_i^{(1)} \ge T\}.
+\]
+This produces a budgeted selection problem in which users are chosen based on both predicted benefit and predicted cost.
+
+\subsection{Common DFL Score, Fairness, and Loss Structure}
+Decision-focused learning (DFL) trains the predictive model through the downstream decision objective. The main difficulty is that the downstream decision rule contains non-differentiable operations, including thresholding, top-$B$ ranking, and greedy knapsack allocation. The DFL methods below differ in how they handle the non-differentiable allocation layer, but they share the same predicted outcomes, threshold scores, fairness computation, and full training loss.
+
+For each user $i$, the model predicts the potential outcomes under no action and action:
+\[
+\hat{Y}_i^{(0)} = \sigma(f_\theta(X_i,0)),
+\qquad
+\hat{Y}_i^{(1)} = \sigma(f_\theta(X_i,1)).
+\]
+The hard threshold utility is approximated by a smooth sigmoid score
+\[
+\hat{S}_i^{(a)}
+=
+\sigma\!\left(
+\frac{\hat{Y}_i^{(a)} - c}{\tau_{\text{thr}}}
+\right),
+\qquad a \in \{0,1\},
+\]
+where $c$ is the usable-data threshold and $\tau_{\text{thr}}>0$ controls the sharpness of the approximation. The marginal threshold score is
+\[
+d_i = \hat{S}_i^{(1)} - \hat{S}_i^{(0)}.
+\]
+In the ranking setting, $d_i$ is the score used to prioritize users. In the knapsack setting, the expected payment cost is approximated by
+\[
+\hat{c}_i
+=
+\alpha \hat{Y}_i^{(1)}
+\sigma\!\left(
+\frac{\hat{Y}_i^{(1)} - c_{\text{pay}}}{\tau_{\text{thr}}}
+\right),
+\]
+
+All DFL methods are trained using stochastic mini-batches rather than the full population. In the ranking/nudging setting, the allocation constraint is naturally scaled to the mini-batch by selecting a fixed fraction of users. In the knapsack/incentive setting, however, the global budget constraint must be approximated at the batch level. We therefore define a mini-batch budget
+\[
+B_{\text{batch}}
+=
+\rho \sum_i \hat c_i,
+\]
+where the sum is taken over the current mini-batch. The parameter $\rho \in (0,1)$ controls the budget ratio. During training, $\rho$ may either be fixed or randomly sampled from a prespecified interval. Randomizing $\rho$ exposes the model to multiple budget regimes during training, while a fixed $\rho$ specializes the model to a single operating budget.
+
+All DFL methods produce an allocation value $\tilde A_i \in [0,1]$ or a hard allocation value $A_i \in \{0,1\}$. Given an allocation vector $\bar A$, where $\bar A$ may denote a soft allocation, an averaged randomized allocation, or a deterministic hard allocation, the policy-level smoothed success value is
+\[
+\hat{S}_i^\pi
+=
+\bar A_i \hat{S}_i^{(1)}
++
+(1-\bar A_i)\hat{S}_i^{(0)}.
+\]
+The shared fairness penalty is then
+\[
+\mathcal{L}_{\text{fair}}
+=
+\sum_{g\in\mathcal{G}}
+\left(
+\frac{1}{|G_g|}
+\sum_{i\in G_g}
+\hat{S}_i^\pi
+-
+\frac{1}{n}
+\sum_i
+\hat{S}_i^\pi
+\right)^2.
+\]
+The full training loss combines a decision-focused loss, a supervised prediction loss, and the fairness penalty:
+\[
+\mathcal{L}
+=
+\lambda_{\text{DFL}}\mathcal{L}_{\text{DFL}}
++
+\lambda_{\text{fair}}\mathcal{L}_{\text{fair}}
++
+\lambda_{\text{mse}}\mathcal{L}_{\text{mse}}.
+\]
+The sections below only describe how each DFL method constructs the allocation layer and the corresponding decision-focused loss.
+
+\subsection{End-to-End Differentiable Approximation for DFL}
+The end-to-end differentiable approach replaces the non-differentiable allocation rule with a smooth surrogate so that gradients can flow through the full decision pipeline.
+
+\paragraph{Ranking allocation.}
+In the ranking/nudging setting, the hard top-$B$ rule selects the $B$ users with the largest marginal scores $d_i$. We approximate this rule with a soft allocation:
+\[
+\tilde{A}_i
+=
+\operatorname{clip}_{[0,1]}
+\left(
+B
+\frac{\exp(d_i/\tau_{\text{alloc}})}
+{\sum_j \exp(d_j/\tau_{\text{alloc}})}
+\right),
+\]
+where $\tau_{\text{alloc}}>0$ controls the smoothness of the allocation. The decision-focused loss is
+\[
+\mathcal{L}_{\text{DFL-rank}}
+=
+-
+\frac{1}{n}
+\sum_i \tilde{A}_i d_i.
+\]
+For the shared fairness computation, we set $\bar A_i=\tilde A_i$.
+
+\paragraph{Knapsack allocation.}
+In the knapsack/incentive setting, the hard allocation problem is
+\[
+\max_{A_i\in\{0,1\}}
+\sum_i A_i d_i
+\quad
+\text{s.t.}
+\quad
+\sum_i A_i \hat{c}_i \le B.
+\]
+We approximate the value-per-cost ranking by
+\[
+r_i = \frac{d_i}{\hat{c}_i+\epsilon},
+\]
+and assign soft weights
+\[
+w_i =
+\frac{\exp(r_i/\tau_{\text{alloc}})}
+{\sum_j \exp(r_j/\tau_{\text{alloc}})}.
+\]
+The allocation is scaled to approximately satisfy the budget:
+\[
+\tilde{A}_i
+=
+\operatorname{clip}_{[0,1]}
+\left(
+\frac{w_i}{\sum_j w_j \hat{c}_j}
+B
+\right).
+\]
+The decision-focused loss is
+\[
+\mathcal{L}_{\text{DFL-knapsack}}
+=
+-
+\frac{1}{n}
+\sum_i \tilde{A}_i d_i.
+\]
+Again, the shared fairness computation uses $\bar A_i=\tilde A_i$.
+
+\subsection{DFL with Randomized Smoothing}
+Randomized smoothing keeps the hard allocation rule but applies it repeatedly to randomly perturbed scores. The averaged selection frequency is then used as a differentiable surrogate in the loss. This preserves the structure of the downstream decision rule more closely than the fully soft allocation, while still producing stable training signals.
+
+\paragraph{Ranking allocation.}
+For the ranking/nudging setting, the hard allocation is
+\[
+A_i(d)
+=
+\mathbf{1}\{i\in\operatorname{TopB}(d)\}.
+\]
+To smooth this rule, we draw $M$ Gaussian perturbations
+\[
+\tilde d_i^{(m)} = d_i + \varepsilon_i^{(m)},
+\qquad
+\varepsilon_i^{(m)}\sim\mathcal{N}(0,\sigma^2),
+\qquad
+m=1,\dots,M.
+\]
+For each perturbed score vector, we recompute the hard top-$B$ allocation:
+\[
+A_i^{(m)}
+=
+\mathbf{1}\{i\in\operatorname{TopB}(\tilde d^{(m)})\}.
+\]
+The smoothed allocation is the average selection frequency:
+\[
+\bar A_i
+=
+\frac{1}{M}
+\sum_{m=1}^M A_i^{(m)}.
+\]
+The decision-focused loss is
+\[
+\mathcal{L}_{\text{RS-rank}}
+=
+-
+\frac{1}{n}
+\sum_i \bar A_i d_i.
+\]
+
+ \paragraph{Knapsack allocation.}
+For the knapsack/incentive setting, we use the shared mini-batch budget construction described above. For each score vector, the hard allocation is computed by a greedy knapsack rule: users are sorted by
+
+Randomized smoothing applies the same greedy rule to perturbed scores. For each perturbation $m$, compute
+\[
+\tilde d_i^{(m)} = d_i + \varepsilon_i^{(m)},
+\qquad
+\varepsilon_i^{(m)}\sim\mathcal{N}(0,\sigma^2),
+\]
+and then
+\[
+A^{(m)}
+=
+\operatorname{GreedyKnapsack}(\tilde d^{(m)},\hat c,B_{\text{batch}}).
+\]
+The averaged allocation is
+\[
+\bar A_i
+=
+\frac{1}{M}
+\sum_{m=1}^M A_i^{(m)},
+\]
+and the decision-focused loss is
+\[
+\mathcal{L}_{\text{RS-knapsack}}
+=
+-
+\frac{1}{n}
+\sum_i \bar A_i d_i.
+\]
+
+In both ranking and knapsack settings, gradients do not pass through the hard allocation solver itself. The averaged allocation $\bar A$ is treated as fixed within the mini-batch, and the model is updated through the score term $d_i$, the prediction loss, and the shared fairness penalty.
+
+\subsection{DFL with Perturbation Gradient}
+The perturbation-gradient method also preserves the hard downstream allocation rule. Instead of replacing the allocation with an averaged selection frequency, it estimates a surrogate gradient by measuring how the hard-allocation objective changes when the score vector is perturbed.
+
+Let $A(d)$ denote the hard allocation produced from scores $d$. In the ranking/nudging setting, $A(d)$ is the top-$B$ allocation. In the knapsack/incentive setting, $A(d)$ is the greedy knapsack allocation using scores $d$, costs $\hat c$, and budget $B$. The hard decision objective is
+\[
+J(d)
+=
+\sum_i A_i(d)d_i.
+\]
+For perturbation sample $m$, draw
+\[
+\varepsilon^{(m)}\sim\mathcal{N}(0,I),
+\]
+and form
+\[
+d^{(m,+)} = d + h\varepsilon^{(m)},
+\qquad
+ d^{(m,-)} = d - h\varepsilon^{(m)},
+\]
+where $h$ is the perturbation scale. The hard allocation rule is recomputed under each perturbed score vector:
+\[
+A^{(m,+)} = A(d^{(m,+)}),
+\qquad
+A^{(m,-)} = A(d^{(m,-)}).
+\]
+In the implementation, the perturbed allocations are evaluated using the original detached score vector:
+\[
+J^{(m,+)} = \sum_i A_i^{(m,+)}d_i,
+\qquad
+J^{(m,-)} = \sum_i A_i^{(m,-)}d_i,
+\]
+with baseline objective
+\[
+J(d)=\sum_i A_i(d)d_i.
+\]
+
+The perturbation-gradient estimator can be computed in three ways.
+
+\paragraph{Forward estimator.}
+The forward estimator compares the positively perturbed allocation with the baseline allocation:
+\[
+\widehat{\nabla}_d J(d)
+=
+\frac{1}{M}
+\sum_{m=1}^M
+\frac{J^{(m,+)}-J(d)}{h}
+\varepsilon^{(m)}.
+\]
+
+\paragraph{Backward estimator.}
+The backward estimator compares the baseline allocation with the negatively perturbed allocation:
+\[
+\widehat{\nabla}_d J(d)
+=
+\frac{1}{M}
+\sum_{m=1}^M
+\frac{J(d)-J^{(m,-)}}{h}
+\varepsilon^{(m)}.
+\]
+
+\paragraph{Central estimator.}
+The central estimator uses a symmetric finite-difference comparison:
+\[
+\widehat{\nabla}_d J(d)
+=
+\frac{1}{M}
+\sum_{m=1}^M
+\frac{J^{(m,+)}-J^{(m,-)}}{2h}
+\varepsilon^{(m)}.
+\]
+
+The estimated gradient is treated as fixed during backpropagation and is used to define the surrogate decision-focused loss
+\[
+\mathcal{L}_{\text{PG}}
+=
+-
+\frac{1}{n}
+\sum_i
+\widehat{\nabla}_{d_i}J(d)\, d_i.
+\]
+For the shared fairness computation, perturbation-gradient DFL uses the deterministic hard allocation from the current scores, $\bar A_i=A_i(d)$. Thus, the method does not differentiate directly through the top-$B$ or greedy knapsack solver; instead, it updates the score model in the direction suggested by randomized finite-difference perturbations of the hard decision objective.

@@ -1,0 +1,183 @@
+\documentclass[12pt]{article}
+
+% --------------------
+% Page setup
+% --------------------
+\usepackage[margin=1in]{geometry}
+\linespread{1.1}
+
+% --------------------
+% Math & symbols
+% --------------------
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{bm}
+
+% --------------------
+% Figures & tables
+% --------------------
+\usepackage{graphicx}
+
+% --------------------
+% Links
+% --------------------
+\usepackage[hidelinks]{hyperref}
+
+% --------------------
+% Title info
+% --------------------
+\title{
+    \vspace{-1cm}
+    \textbf{Project Report} \\
+    \large CS619 End-to-End Learning and Optimization
+}
+\author{
+    Jinghong Miao
+    % Roll Number / Student ID \\
+    % Institution Name
+}
+\date{}
+
+% --------------------
+% Document
+% --------------------
+\begin{document}
+
+\maketitle
+\vspace{-0.5cm}
+
+\section{Formulation}
+The goal is to choose which users should receive an intervention before the next month so that total data collection increases under a budget constraint. For each user $i$, let $A_i \in \{0,1\}$ indicate whether the intervention is assigned. Let $Y_i^{(0)}$ and $Y_i^{(1)}$ denote next-month wear under no intervention and under intervention, respectively. The policy should prioritize users with high expected benefit while respecting operational or financial limits.
+
+\subsection{Intervention Types}
+
+\paragraph{Nudging}
+A nudge is a personalized reminder delivered before the next month starts. Because each nudge requires limited staff time, the constraint is on the number of users contacted:
+\[
+\sum_i A_i \le B,
+\]
+where $B$ is the maximum number of actions.
+
+\paragraph{Incentive}
+An incentive promises payment if a user wears the device enough during the next month. The cost is only realized after outcomes are observed, so the constraint is on expected spend rather than on the number of offers:
+\[
+\mathbb{E}\left[\sum_i C_i A_i \right] \le B,
+\]
+where $C_i$ is the realized cost for user $i$. For example,
+\[
+C_i = \alpha Y_i \cdot \mathbf{1}\{Y_i \ge T\},
+\]
+where $T$ is the payment threshold and $\alpha$ converts wear into dollars. This structure allows more offers than the nominal budget would allow if not all users qualify for payment.
+
+\subsection{Objective}
+The simplest objective is expected uplift in wear:
+\[
+\sum_i A_i \left(Y^{(1)}_i - Y^{(0)}_i\right).
+\]
+
+In many applications, marginal wear is most valuable only after a user crosses a useful-data threshold, such as wearing the device for at least $60\%$ of days. Define
+\[
+u(Y_i) = \begin{cases}
+    1, & \text{if } Y_i \ge T, \\
+    0, & \text{if } Y_i < T.
+\end{cases}
+\]
+The thresholded uplift objective is then
+\[
+\sum_i A_i \left(u(Y^{(1)}_i) - u(Y^{(0)}_i)\right).
+\]
+
+To avoid concentrating gains in only a few demographic groups, add a balance penalty. Let $\mathcal{G}$ be the set of groups, $N_g$ the number of users in group $g$, and
+\[
+r_{\text{overall}} = \frac{1}{N}\sum_i \left[
+A_i u(Y_i^{(1)})+(1-A_i)u(Y_i^{(0)})
+\right],
+\]
+\[
+r_g =
+\frac{1}{N_g}
+\sum_{i\in g}
+\left[
+A_i u(Y_i^{(1)})+(1-A_i)u(Y_i^{(0)})
+\right]
+\]
+The final objective can be written in the general form
+\[
+\max_A \lambda_1 \sum_i A_i \left(Y^{(1)}_i - Y^{(0)}_i\right) + \lambda_2 \sum_i A_i \left(u(Y^{(1)}_i) - u(Y^{(0)}_i)\right)
+- \lambda_3 \sum_{g \in \mathcal{G}} \left(r_g - r_{\text{overall}}\right)^2,
+\]
+subject to the appropriate budget constraint. The tuning parameters $\lambda_1$, $\lambda_2$, and $\lambda_3$ control the tradeoff between total uplift and group balance.
+
+\section{Simulation}
+The simulation creates a controlled setting where the true treatment effects are known. Each user $i$ has a group assignment $G_i$ and covariates $X_i \in \mathbb{R}^5$. Daily wear is modeled as a two-state Markov chain, where state $1$ means the device is worn and state $0$ means it is not worn. The baseline transition probabilities are
+\begin{align*}
+    p_i &= P_i^{11} = \sigma(f_1(G_i, X_i)) \\
+    q_i &= P_i^{00} = \sigma(f_2(G_i, X_i)),
+\end{align*}
+where $p_i$ is the probability of remaining compliant, $q_i$ is the probability of remaining noncompliant, and $\sigma$ is the sigmoid function.
+
+The intervention effect also depends on $G_i$ and $X_i$:
+\begin{align*}
+    \tau^p_i &= \sigma(g_1(G_i, X_i)) \\
+    \tau^q_i &= \sigma(g_2(G_i, X_i)).
+\end{align*}
+Under treatment, the transition probabilities become
+\begin{align*}
+    p'_i &=  p_i + (1-p_i) \tau^p_i \\
+    q'_i &=  q_i (1-\tau^q_i).
+\end{align*}
+This parameterization keeps probabilities in $[0,1]$ and makes treatment weakly improve persistence in both states.
+
+For each user, the initial state is sampled from the stationary distribution of the baseline Markov chain. We first simulate a 30-day pre-intervention history $V_i$ using $p_i$ and $q_i$. We then randomize treatment $A_i$ and simulate the next 30 days. Control users follow the baseline transition probabilities; treated users follow $p'_i$ and $q'_i$. The post-intervention outcome $Y_i$ is the fraction of compliant days in this second 30-day period. The simulated data are split into training and test sets.
+
+\section{Two-Stage: Prediction and Optimization}
+\subsection{Outcome Model}
+The predictive model is trained on the training set with features $(G_i, X_i, V_i, A_i)$ and target $Y_i$. At decision time, the model is evaluated twice for each test user: once with $A_i = 0$ and once with $A_i = 1$. This gives estimates $\hat{Y}_i^{(0)}$ and $\hat{Y}_i^{(1)}$, which are used to estimate uplift.
+
+\subsection{Policy Selection}
+The estimated potential outcomes are plugged into the objective from Section 1. For the nudging setting, the decision rule can be implemented by ranking users by estimated objective contribution and selecting the top $B$, with any balance penalty incorporated into the selection criterion. For the incentive setting, the policy must account for expected cost, replacing $C_i$ with its model-based estimate and solving the resulting budgeted selection problem.
+
+\section{Decision-Focused Learning}
+% The two-stage approach trains the outcome model for prediction and only later uses it for optimization.Decision-focused learning instead trains the model through a differentiable approximation of the final decision problem. This encourages the model to be accurate where prediction errors affect the selected policy most.
+Decision-focused learning trains the model through a differentiable approximation of the final decision problem. 
+
+For each mini-batch, the same model is evaluated twice for every user: once with $A_i = 0$ and once with $A_i = 1$. This gives predicted potential outcomes $\hat{Y}_i^{(0)}$ and $\hat{Y}_i^{(1)}$. To approximate the threshold utility, replace the hard indicator with a smooth success probability,
+\[
+\hat{S}_i^{(a)} =
+\sigma\left(\frac{\hat{Y}_i^{(a)} - T}{\tau_y}\right),
+\qquad a \in \{0,1\},
+\]
+where $\tau_y$ controls the smoothness of the threshold. The estimated decision score is
+\[
+s_i = \hat{S}_i^{(1)} - \hat{S}_i^{(0)}.
+\]
+
+For the nudging setting, the hard top-$B$ decision can be approximated with a soft allocation within the mini-batch:
+\[
+\tilde{A}_i = B_{\text{batch}}
+\frac{\exp(s_i / \tau_a)}{\sum_j \exp(s_j / \tau_a)},
+\]
+where $B_{\text{batch}}$ is the mini-batch budget and $\tau_a$ controls how close the allocation is to a hard ranking. The decision-focused objective is then
+\[
+\max_\theta \sum_i \tilde{A}_i s_i,
+\]
+where $\theta$ denotes the model parameters.
+
+In practice, this optimization should be regularized with the observed outcome loss,
+\[
+\mathcal{L}(\theta)
+= -\sum_i \tilde{A}_i s_i
++ \eta \sum_i \left(\hat{Y}_i^{(A_i)} - Y_i\right)^2,
+\]
+where $\eta$ controls the strength of prediction supervision. The supervised term stabilizes training and discourages degenerate solutions that improve the soft decision objective by distorting the predicted potential outcomes.
+
+\section{Evaluation}
+On the test set, the two-stage policy and the decision-focused policy can be compared with random assignment, no intervention, and an oracle policy that uses the true simulated potential outcomes. The main metrics are total uplift, thresholded utility gain, budget usage, and the group-balance penalty. 
+
+% This comparison separates prediction quality from the optimization layer and shows whether the policy improves data collection under realistic constraints.
+
+
+
+% --------------------
+% \bibliography{references}
+
+\end{document}

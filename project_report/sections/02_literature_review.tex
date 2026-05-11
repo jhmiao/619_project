@@ -1,0 +1,12 @@
+\section{Related Work}
+
+\paragraph{Markov Behavior Model}
+Markov models are frequently used to model behaviors [cite]. 
+
+\paragraph{Treatment Allocation under Uncertain Response} 
+
+\paragraph{Two-Stage Decision-Blind Methods} 
+
+\paragraph{Decision-Focused Learning}
+The key to decision-focused learning is how to design a full training pipeline so that we can directly optimize for the decision. One common approach is to train a neural network that takes contextual information as input and train it to output the optimal decision. The nontrivial components of this pipeline include 1) dealing with the non-differentiable parts present in the optimization problem and 2) guaranteeing feasibility. For feasibility, the easiest way is to have a fix routine that ensures feasibility as the last step of the pipeline. For non-differentiability, besides having no gradient at certain areas of the function, it also leads to noninformative gradient. Methods to deal with this include parametrization, randomized smoothing and perturbation gradient methods. 
+

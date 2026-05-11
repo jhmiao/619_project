@@ -1,0 +1,75 @@
+\section{Problem Statement}
+
+Consider the problem of deciding which subset of users to give intervention to given contextual information of wear history, covariate features, and previous response to intervention. The goal is to decide which users should receive an intervention before the next month to optimally increase next month's data collection reward under a budget constraint. 
+
+For each user $i$, let $A_i \in \{0,1\}$ indicate whether the intervention is assigned. Let $Y_i^{(0)}$ and $Y_i^{(1)}$ denote next-month wear under no intervention and under intervention, respectively. The policy should prioritize users with high expected benefit while respecting operational or financial limits.
+
+
+
+\subsection{Objective Function}
+The simplest objective is expected uplift in wear. Define
+\[
+\tau(X_i) := \mathbb{E}\!\left[Y_i^{(1)} - Y_i^{(0)} \mid X_i\right].
+\]
+Then the expected total uplift is 
+\[
+\sum_i  A_i \tau(X_i).
+\]
+\paragraph{Threshold Utility.} In many real-world applications, however, marginal wear is most valuable only after a user crosses a useful-data threshold, such as wearing the device for at least $60\%$ of time. Define
+\[
+u(Y_i) = \begin{cases}
+    1, & \text{if } Y_i \ge T, \\
+    0, & \text{if } Y_i < T.
+\end{cases}
+\]
+and 
+\[
+d(X_i) := \mathbb{E}\!\left[u(Y^{(1)}_i) - u(Y^{(0)}_i) \mid X_i\right].
+\]
+The thresholded uplift objective is then
+\[
+\sum_i A_i d(X_i).
+\]
+\paragraph{Fairness in Data Collection}To avoid concentrating gains in only a few demographic groups and potentially leading to a biased dataset, we add a balance penalty. Let $\mathcal{G}$ be the set of mutually exclusive and collectively exhaustive groups that we care about balancing the data across, $N_g$ the number of users in group $g$, and $r_{\text{overall}}, r_g$, the average data collection reward over the whole population and over the group. 
+\[
+r_{\text{overall}} = \frac{1}{N}\sum_i \mathbb{E}\left[
+A_i u(Y_i^{(1)})+(1-A_i)u(Y_i^{(0)}) \mid X_i
+\right],
+\]
+\[
+r_g =
+\frac{1}{N_g}
+\sum_{i\in g} \mathbb{E}
+\left[
+A_i u(Y_i^{(1)})+(1-A_i)u(Y_i^{(0)}) \mid X_i
+\right]
+\]
+The final objective can be written in the general form
+\begin{multline} \label{eq:obj}
+\max_A \lambda_1 \sum_i A_i \tau(X_i) + \lambda_2 \sum_i A_i d(X_i)\\
+- \lambda_3 \sum_{g \in \mathcal{G}}  \left(r_g - r_{\text{overall}}\right)^2,
+\end{multline}
+subject to the appropriate budget constraint. The tuning parameters $\lambda_1$, $\lambda_2$, and $\lambda_3$ control the tradeoff between total uplift and group balance. 
+
+\subsection{Intervention Types}
+
+\paragraph{Nudging}
+A nudge is a personalized reminder delivered before the next month starts. Because each nudge requires limited staff time, the constraint is on the number of users contacted:
+\[
+\sum_i A_i \le B,
+\]
+where $B$ is the maximum number of actions.
+
+\paragraph{Incentive}
+An incentive promises payment if a user wears the device enough during the next month. The cost is only realized after outcomes are observed, so the constraint is on expected spend rather than on the number of offers:
+\[
+\mathbb{E}\left[\sum_i C_i A_i \right] \le B,
+\]
+where $C_i$ is the realized cost for user $i$. For example,
+\[
+C_i = \alpha Y_i \cdot \mathbf{1}\{Y_i \ge T\},
+\]
+where $T$ is the payment threshold and $\alpha$ converts wear into dollars. This structure allows more offers than the nominal budget would allow if not all users qualify for payment.
+
+The two settings correspond to two classic problems in their stochastic version: the ranking problem and the knapsack problem. 
+

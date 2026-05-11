@@ -1,0 +1,13 @@
+\section{Introduction}
+
+Wearable devices such as Fitbit and Apple Watch are increasingly used to collect longitudinal health behavior data for large-scale studies. Compared to traditional medical devices, they are relatively inexpensive and easy to deploy, making them attractive tools for population-level health monitoring and behavioral research. However, maintaining long-term participant compliance remains a major challenge.
+
+In the ALiR study [cite], wearable devices were distributed to more than 1,000 participants who agreed to wear the device for at least 60\% of the time over a one-year study period. In practice, only about one third of participants consistently met this compliance threshold. Moreover, while the initial participant population was balanced across demographic groups, some groups exhibited substantially higher dropout rates over time, leading to imbalance in the collected dataset.
+
+Both reminders and monetary incentives may help improve participation. Survey responses from the ALiR study suggest that some participants simply forget to wear the device, indicating that reminder-based interventions may increase compliance. Monetary incentives may also improve adherence: during the first 12 months of the study, participants received a $\$5$ reward for each month in which they satisfied the compliance threshold, and participation declined after incentives ended.
+
+These settings naturally lead to a contextual stochastic optimization problem. Before the next month begins, we observe contextual information such as demographic covariates and historical wear patterns, then decide which users should receive an intervention. The true compliance outcome is only realized afterward, introducing uncertainty into both the utility and cost of the decision.
+
+A standard approach is the predict-then-optimize (PTO) framework, which first predicts future outcomes and then solves a downstream allocation problem using the predictions. However, in our setting, the downstream objective includes threshold utility, fairness considerations, and budget constraints, making accurate prediction alone insufficient for good decision quality. This motivates the use of decision-focused learning (DFL), where the predictive model is trained directly through the downstream optimization objective.
+
+In this project, we study both ranking-based nudging interventions and knapsack-style monetary incentive allocation. We compare PTO and several DFL approaches, including end-to-end differentiable approximation, randomized smoothing, and perturbation-gradient methods, under threshold utility, fairness penalties, and stochastic budget constraints.
