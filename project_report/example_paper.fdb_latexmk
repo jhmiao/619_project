@@ -1,5 +1,5 @@
 # Fdb version 4
-["pdflatex"] 1778519254.44411 "/Users/jinghongmiao/Code/619-code/project/project_report/example_paper.tex" "example_paper.pdf" "example_paper" 1778519254.71467 0
+["pdflatex"] 1778537947.65268 "/Users/jinghongmiao/Code/619-code/project/project_report/example_paper.tex" "example_paper.pdf" "example_paper" 1778537947.89624 0
   "/Users/jinghongmiao/Code/619-code/project/project_report/example_paper.tex" 1778436479.69426 721 7f52475c256211b6c3626a465c123850 ""
   "/Users/jinghongmiao/Library/TinyTeX/texmf-dist/fonts/enc/dvips/base/8r.enc" 1165713224 4850 80dc9bab7f31fb78a000ccfed0e27cab ""
   "/Users/jinghongmiao/Library/TinyTeX/texmf-dist/fonts/tfm/adobe/times/ptmb7t.tfm" 1136768653 2172 fd0c924230362ff848a33632ed45dc23 ""
@@ -104,8 +104,8 @@
   "/Users/jinghongmiao/Library/TinyTeX/texmf.cnf" 1741312561.46503 708 85fd07691b6294ba94c59dbc62380410 ""
   "algorithm.sty" 1778461242 2223 ada3eaa0c1bd465a639433dfafc2fc4e ""
   "algorithmic.sty" 1778461242 7414 ce084815cf0aab483787dbc4bf2ace9c ""
-  "example_paper.aux" 1778519254.68584 162 87159b23cce7c2b923b11c85495bbd6d "pdflatex"
-  "example_paper.out" 1778519254.6598 0 d41d8cd98f00b204e9800998ecf8427e "pdflatex"
+  "example_paper.aux" 1778537947.86939 162 87159b23cce7c2b923b11c85495bbd6d "pdflatex"
+  "example_paper.out" 1778537947.8452 0 d41d8cd98f00b204e9800998ecf8427e "pdflatex"
   "example_paper.tex" 1778436479.69426 721 7f52475c256211b6c3626a465c123850 ""
   "fancyhdr.sty" 1778461242 20521 e5d13d98d57bd53d4fed3aa61bd29c86 ""
   "icml2025.sty" 1778461242 28139 f5c678f69b3c5a59b713c3d382dd393c ""
@@ -113,7 +113,7 @@
   "sections/01_problem_statement.tex" 1778519254.21452 2666 dc9b03d7437b1e0e8799c67ffe06acc4 ""
   "sections/02_literature_review.tex" 1778484036.25798 1054 c33eaa6230816c2472636e2be405b0d7 ""
   "sections/03_approach.tex" 1778436479.75265 401 550950433e2b35f807dcf9742ab4171c ""
-  "sections/04_results.tex" 1778436479.76747 156 94f6ebc93e74ff164698ec99ebb7fabf ""
+  "sections/04_results.tex" 1778537947.4344 918 bfb98a2c8318ca4a77b8e4e344097333 ""
   "sections/05_discussion.tex" 1778436479.78106 320 60fa3dd12571cbe872dc8e371727c62f ""
   (generated)
   "example_paper.aux"

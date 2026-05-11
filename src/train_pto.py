@@ -42,7 +42,7 @@ if str(SRC_DIR) not in sys.path:
 from models import OutcomeNet, count_parameters  # noqa: E402
 
 
-SEED = 42
+SEED = 10
 DEFAULT_BATCH_SIZE = 256
 DEFAULT_LR = 1e-3
 DEFAULT_MAX_EPOCHS = 200

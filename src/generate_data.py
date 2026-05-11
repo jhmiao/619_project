@@ -62,70 +62,163 @@ def simulate_markov_sequence(
     return seq
 
 
+# def build_transition_probabilities(
+#     x: np.ndarray,
+#     group: np.ndarray,
+#     rng: np.random.Generator,
+#     noise_std: float = TRANSITION_NOISE_STD,
+# ) -> pd.DataFrame:
+#     """
+#     Map covariates and group membership to baseline and treated transition probabilities.
+
+#     The coefficients are chosen to create heterogeneous baseline adherence and treatment response.
+#     Group B is slightly harder at baseline but somewhat more responsive to action.
+
+#     In addition, latent Gaussian noise is added to the transition logits so that
+#     users with identical observed covariates can still behave differently.
+#     This makes the downstream decision problem less deterministic and generally
+#     more challenging for PTO.
+#     """
+#     group_b = (group == "B").astype(float)
+
+#     x1 = x[:, 0]
+#     x2 = x[:, 1]
+#     x3 = x[:, 2]
+#     x4 = x[:, 3]
+#     x5 = x[:, 4]
+
+#     n_users = x.shape[0]
+
+#     # Latent user-level heterogeneity.
+#     # These noises affect the logits before sigmoid transformation.
+#     eps_p = rng.normal(loc=0.0, scale=noise_std, size=n_users)
+#     eps_q = rng.normal(loc=0.0, scale=noise_std, size=n_users)
+#     eps_tau_p = rng.normal(loc=0.0, scale=noise_std, size=n_users)
+#     eps_tau_q = rng.normal(loc=0.0, scale=noise_std, size=n_users)
+
+#     # Baseline persistence probabilities.
+#     p = sigmoid(
+#         0.70 + 0.85 * x1 - 0.35 * x2 + 0.25 * x3 - 0.45 * group_b + eps_p
+#     )
+#     q = sigmoid(
+#         0.35 - 0.65 * x1 + 0.45 * x2 - 0.25 * x4 + 0.35 * group_b + eps_q
+#     )
+
+#     # Treatment responsiveness. These are not direct probability increases;
+#     # they are scaled through p' = p + (1-p) tau_p and q' = q + (1-q) tau_q.
+#     tau_p = sigmoid(
+#         -1.55 + 0.65 * x2 - 0.30 * x3 + 0.55 * group_b + eps_tau_p
+#     )
+#     tau_q = sigmoid(
+#         -1.75 + 0.50 * x4 + 0.25 * x5 + 0.45 * group_b + eps_tau_q
+#     )
+
+#     p_treated = p + (1.0 - p) * tau_p
+#     q_treated = q * (1.0 - tau_q)
+
+#     return pd.DataFrame(
+#         {
+#             "p": p,
+#             "q": q,
+#             "tau_p": tau_p,
+#             "tau_q": tau_q,
+#             "p_treated": p_treated,
+#             "q_treated": q_treated,
+#         }
+#     )
+
 def build_transition_probabilities(
     x: np.ndarray,
     group: np.ndarray,
     rng: np.random.Generator,
-    noise_std: float = TRANSITION_NOISE_STD,
+    noise_std: float = 0.7,
 ) -> pd.DataFrame:
-    """
-    Map covariates and group membership to baseline and treated transition probabilities.
-
-    The coefficients are chosen to create heterogeneous baseline adherence and treatment response.
-    Group B is slightly harder at baseline but somewhat more responsive to action.
-
-    In addition, latent Gaussian noise is added to the transition logits so that
-    users with identical observed covariates can still behave differently.
-    This makes the downstream decision problem less deterministic and generally
-    more challenging for PTO.
-    """
     group_b = (group == "B").astype(float)
 
-    x1 = x[:, 0]
-    x2 = x[:, 1]
-    x3 = x[:, 2]
-    x4 = x[:, 3]
-    x5 = x[:, 4]
+    x1, x2, x3, x4, x5 = x.T
+    n = x.shape[0]
 
-    n_users = x.shape[0]
+    # Correlated latent user traits:
+    # u_adherence: naturally persistent users
+    # u_instability: users prone to switching / dropout
+    # u_response: unobserved treatment responsiveness
+    cov = np.array([
+        [1.0, -0.4, -0.2],
+        [-0.4, 1.0, 0.3],
+        [-0.2, 0.3, 1.0],
+    ])
+    u = rng.multivariate_normal(mean=np.zeros(3), cov=cov, size=n)
+    u_adherence = noise_std * u[:, 0]
+    u_instability = noise_std * u[:, 1]
+    u_response = noise_std * u[:, 2]
 
-    # Latent user-level heterogeneity.
-    # These noises affect the logits before sigmoid transformation.
-    eps_p = rng.normal(loc=0.0, scale=noise_std, size=n_users)
-    eps_q = rng.normal(loc=0.0, scale=noise_std, size=n_users)
-    eps_tau_p = rng.normal(loc=0.0, scale=noise_std, size=n_users)
-    eps_tau_q = rng.normal(loc=0.0, scale=noise_std, size=n_users)
-
-    # Baseline persistence probabilities.
-    p = sigmoid(
-        0.70 + 0.85 * x1 - 0.35 * x2 + 0.25 * x3 - 0.45 * group_b + eps_p
-    )
-    q = sigmoid(
-        0.35 - 0.65 * x1 + 0.45 * x2 - 0.25 * x4 + 0.35 * group_b + eps_q
+    # Baseline transition logits.
+    # p = P(1 -> 1): persistence when already adherent
+    # q = P(0 -> 1): recovery when not adherent
+    logit_p = (
+        0.80
+        + 0.75 * x1
+        - 0.25 * x2
+        + 0.20 * x3
+        - 0.35 * group_b
+        + u_adherence
+        - 0.20 * u_instability
     )
 
-    # Treatment responsiveness. These are not direct probability increases;
-    # they are scaled through p' = p + (1-p) tau_p and q' = q + (1-q) tau_q.
-    tau_p = sigmoid(
-        -1.55 + 0.65 * x2 - 0.30 * x3 + 0.55 * group_b + eps_tau_p
+    logit_q = (
+        -0.45
+        + 0.45 * x1
+        + 0.35 * x2
+        - 0.25 * x4
+        - 0.20 * group_b
+        + 0.40 * u_adherence
+        - 0.55 * u_instability
     )
-    tau_q = sigmoid(
-        -1.75 + 0.50 * x4 + 0.25 * x5 + 0.45 * group_b + eps_tau_q
+
+    p = sigmoid(logit_p)
+    q = sigmoid(logit_q)
+
+    # Treatment response logits.
+    # Group B is more responsive, but response also depends on hidden traits.
+    logit_tau_p = (
+        -2.10
+        + 0.55 * x2
+        - 0.25 * x3
+        + 0.45 * group_b
+        + u_response
+        - 0.20 * u_adherence
     )
+
+    logit_tau_q = (
+        -1.90
+        + 0.45 * x4
+        + 0.25 * x5
+        + 0.55 * group_b
+        + 0.80 * u_response
+        + 0.20 * u_instability
+    )
+
+    tau_p = sigmoid(logit_tau_p)
+    tau_q = sigmoid(logit_tau_q)
+
+    # Optional: shrink response so treatment is helpful but not too strong.
+    tau_p = 0.7 * tau_p
+    tau_q = 0.7 * tau_q
 
     p_treated = p + (1.0 - p) * tau_p
-    q_treated = q * (1.0 - tau_q)
+    q_treated = q + (1.0 - q) * tau_q
 
-    return pd.DataFrame(
-        {
-            "p": p,
-            "q": q,
-            "tau_p": tau_p,
-            "tau_q": tau_q,
-            "p_treated": p_treated,
-            "q_treated": q_treated,
-        }
-    )
+    return pd.DataFrame({
+        "p": p,
+        "q": q,
+        "tau_p": tau_p,
+        "tau_q": tau_q,
+        "p_treated": p_treated,
+        "q_treated": q_treated,
+        "u_adherence": u_adherence,
+        "u_instability": u_instability,
+        "u_response": u_response,
+    })
 
 
 def generate_dataset() -> pd.DataFrame:

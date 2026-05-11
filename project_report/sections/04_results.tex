@@ -1,3 +1,6 @@
 \section{Results}
 
-TODO: Report the main quantitative comparisons between baselines, predict-then-optimize, decision-focused learning, and oracle policies.
+\subsection{Experimental Setup}
+All methods use the same outcome model architecture: a two-hidden-layer MLP with 64 ReLU units per layer and dropout 0.1. The input contains the group indicator, five baseline covariates, 30 pre-intervention wear indicators, and the action indicator, for 37 features total. Thus PTO, DFL, randomized smoothing, and perturbation-gradient methods have the same model capacity and differ only in their training objective and allocation surrogate.
+
+For PTO, we use 5-fold cross-validation to choose the number of training epochs, then retrain the final model on the full training set for the mean best epoch. The DFL variants use the same protocol: each variant is cross-validated to select an epoch count and then retrained on all training data. All reported policies are evaluated on the same held-out test set under the same threshold, budget, and allocation setting.

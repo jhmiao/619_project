@@ -40,7 +40,7 @@ from optimize import (  # noqa: E402
     step_utility,
 )
 
-DEFAULT_BUDGET_PCT = 0.01
+DEFAULT_BUDGET_PCT = 0.1
 DEFAULT_BUDGET = int(DEFAULT_BUDGET_PCT * 1500) # Based on test set size of 1500 users.
 DEFAULT_THRESHOLD = 0.60
 DEFAULT_UTILITY = "step"
@@ -238,12 +238,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate PTO allocation on test set.")
     parser.add_argument("--test-path", type=Path, default=PROJECT_ROOT / "data" / "test.csv")
     parser.add_argument("--pto-model-path", type=Path, default=PROJECT_ROOT / "outputs" / "pto_model.pt")
-    parser.add_argument("--dfl-model-path", type=Path, default=PROJECT_ROOT / "outputs" / "dfl_payment_model.pt")
-    parser.add_argument("--rs-model-path", type=Path, default=PROJECT_ROOT / "outputs" / "payment_rs_model.pt")
-    parser.add_argument("--pg-model-path", type=Path, default=PROJECT_ROOT / "outputs" / "pg_model.pt")
-    parser.add_argument("--pg-forward-model-path", type=Path, default=PROJECT_ROOT / "outputs" / "payment_pg_forward_model.pt")
-    parser.add_argument("--pg-backward-model-path", type=Path, default=PROJECT_ROOT / "outputs" / "payment_pg_backward_model.pt")
-    parser.add_argument("--pg-central-model-path", type=Path, default=PROJECT_ROOT / "outputs" / "payment_pg_central_model.pt")
+    parser.add_argument("--dfl-model-path", type=Path, default=PROJECT_ROOT / "outputs" / "dfl_model.pt")
+    parser.add_argument("--rs-model-path", type=Path, default=PROJECT_ROOT / "outputs" / "rs_model.pt")
+    parser.add_argument("--pg-forward-model-path", type=Path, default=PROJECT_ROOT / "outputs" / "pg_forward_model.pt")
+    parser.add_argument("--pg-backward-model-path", type=Path, default=PROJECT_ROOT / "outputs" / "pg_backward_model.pt")
+    parser.add_argument("--pg-central-model-path", type=Path, default=PROJECT_ROOT / "outputs" / "pg_central_model.pt")
     parser.add_argument("--allocation-path", type=Path, default=PROJECT_ROOT / "outputs" / "test_allocations.csv")
     parser.add_argument("--metrics-path", type=Path, default=PROJECT_ROOT / "outputs" / "test_metrics.csv")
     parser.add_argument("--budget", type=int, default=DEFAULT_BUDGET)
@@ -261,7 +260,6 @@ def main() -> None:
     pto_model, pto_feature_cols, pto_scaler, pto_model_class = load_checkpoint(args.pto_model_path, device)
     dfl_model, dfl_feature_cols, dfl_scaler, dfl_model_class = load_checkpoint(args.dfl_model_path, device)
     rs_model, rs_feature_cols, rs_scaler, rs_model_class = load_checkpoint(args.rs_model_path, device)
-    pg_model, pg_feature_cols, pg_scaler, pg_model_class = load_checkpoint(args.pg_model_path, device)
     pg_forward_model, pg_forward_feature_cols, pg_forward_scaler, pg_forward_model_class = load_checkpoint(args.pg_forward_model_path, device)
     pg_backward_model, pg_backward_feature_cols, pg_backward_scaler, pg_backward_model_class = load_checkpoint(args.pg_backward_model_path, device)
     pg_central_model, pg_central_feature_cols, pg_central_scaler, pg_central_model_class = load_checkpoint(args.pg_central_model_path, device)
@@ -272,8 +270,8 @@ def main() -> None:
     if pto_feature_cols != rs_feature_cols:
         raise ValueError("PTO and RS checkpoints use different feature columns.")
     
-    if pto_feature_cols != pg_feature_cols:
-        raise ValueError("PTO and PG checkpoints use different feature columns.")
+    # if pto_feature_cols != pg_feature_cols:
+    #     raise ValueError("PTO and PG checkpoints use different feature columns.")
     
     if pto_feature_cols != pg_forward_feature_cols:
         raise ValueError("PTO and PG forward checkpoints use different feature columns.")
@@ -289,7 +287,7 @@ def main() -> None:
     print(f"Loaded PTO model class: {pto_model_class}")
     print(f"Loaded DFL model class: {dfl_model_class}")
     print(f"Loaded RS model class: {rs_model_class}")
-    print(f"Loaded PG model class: {pg_model_class}")
+    # print(f"Loaded PG model class: {pg_model_class}")
     print(f"Loaded PG forward model class: {pg_forward_model_class}")
     print(f"Loaded PG backward model class: {pg_backward_model_class}")
     print(f"Loaded PG central model class: {pg_central_model_class}")
@@ -321,14 +319,14 @@ def main() -> None:
         device=device,
     )
 
-    pg_y0_hat, pg_y1_hat = predict_counterfactuals(
-        model= pg_model,
-        model_class=pg_model_class,
-        df=df,
-        feature_cols=feature_cols,
-        scaler=pg_scaler,
-        device=device,
-    )
+    # pg_y0_hat, pg_y1_hat = predict_counterfactuals(
+    #     model= pg_model,
+    #     model_class=pg_model_class,
+    #     df=df,
+    #     feature_cols=feature_cols,
+    #     scaler=pg_scaler,
+    #     device=device,
+    # )
 
     pgf_y0_hat, pgf_y1_hat = predict_counterfactuals(
         model= pg_forward_model,
@@ -363,41 +361,28 @@ def main() -> None:
     #     budget=args.budget,
     #     utility=args.utility,
     #     threshold=args.threshold,
-    #     require_positive_score=True,
+    #     require_positive_score=False,
     # )
 
-    # pto_allocation = solve_fair_allocation_action(
-    #     y0_hat=pto_y0_hat,
-    #     y1_hat=pto_y1_hat,
-    #     group=df["group"].to_numpy(),
-    #     budget=args.budget,
-    #     fairness_weight=5.0,
-    #     utility=args.utility,
-    #     threshold=args.threshold,
-    #     require_positive_score=True,
-    #     verbose=True,
-    # )
-    
-    pto_allocation = solve_fair_allocation_payment(
+    pto_allocation = solve_fair_allocation_action(
         y0_hat=pto_y0_hat,
         y1_hat=pto_y1_hat,
         group=df["group"].to_numpy(),
         budget=args.budget,
-        fairness_weight=5.0,
+        fairness_weight=1.0,
         utility=args.utility,
         threshold=args.threshold,
-        payment_threshold = args.threshold,
-        require_positive_score=True,
+        require_positive_score=False,
         verbose=True,
     )
-
+    
     dfl_allocation = solve_top_b_allocation(
         y0_hat=dfl_y0_hat,
         y1_hat=dfl_y1_hat,
         budget=args.budget,
         utility=args.utility,
         threshold=args.threshold,
-        require_positive_score=True,
+        require_positive_score=False,
     )
 
     rs_allocation = solve_top_b_allocation(
@@ -406,17 +391,17 @@ def main() -> None:
         budget=args.budget,
         utility=args.utility,
         threshold=args.threshold,
-        require_positive_score=True,
+        require_positive_score=False,
     )
 
-    pg_allocation = solve_top_b_allocation(
-        y0_hat=pg_y0_hat,
-        y1_hat=pg_y1_hat,
-        budget=args.budget,
-        utility=args.utility,
-        threshold=args.threshold,
-        require_positive_score=False,  # PG can select negative scores since it's just a risk score.
-    )
+    # pg_allocation = solve_top_b_allocation(
+    #     y0_hat=pg_y0_hat,
+    #     y1_hat=pg_y1_hat,
+    #     budget=args.budget,
+    #     utility=args.utility,
+    #     threshold=args.threshold,
+    #     require_positive_score=False,  # PG can select negative scores since it's just a risk score.
+    # )
 
     pgf_allocation = solve_top_b_allocation(
         y0_hat=pgf_y0_hat,
@@ -466,6 +451,7 @@ def main() -> None:
                 threshold=args.threshold,
             ),
             "pto_selected": pto_allocation,
+
             "dfl_y0_hat": dfl_y0_hat,
             "dfl_y1_hat": dfl_y1_hat,
             "dfl_score_hat": compute_scores(
@@ -475,6 +461,7 @@ def main() -> None:
                 threshold=args.threshold,
             ),
             "dfl_selected": dfl_allocation,
+
             "rs_y0_hat": rs_y0_hat,
             "rs_y1_hat": rs_y1_hat,
             "rs_score_hat": compute_scores(
@@ -484,15 +471,17 @@ def main() -> None:
                 threshold=args.threshold,
             ),
             "rs_selected": rs_allocation,
-            "pg_y0_hat": pg_y0_hat,
-            "pg_y1_hat": pg_y1_hat,
-            "pg_score_hat": compute_scores(
-                pg_y0_hat,
-                pg_y1_hat,
-                utility=args.utility,
-                threshold=args.threshold,
-            ),
-            "pg_selected": pg_allocation,
+
+            # "pg_y0_hat": pg_y0_hat,
+            # "pg_y1_hat": pg_y1_hat,
+            # "pg_score_hat": compute_scores(
+            #     pg_y0_hat,
+            #     pg_y1_hat,
+            #     utility=args.utility,
+            #     threshold=args.threshold,
+            # ),
+            # "pg_selected": pg_allocation,
+
             "pgf_y0_hat": pgf_y0_hat,
             "pgf_y1_hat": pgf_y1_hat,
             "pgf_score_hat": compute_scores(
@@ -557,7 +546,7 @@ def main() -> None:
         ("pto", pto_allocation),
         ("dfl", dfl_allocation),
         ("rs", rs_allocation),
-        ("pg", pg_allocation),
+        # ("pg", pg_allocation),
         ("pgf", pgf_allocation),
         ("pgb", pgb_allocation),
         ("pgc", pgc_allocation),
@@ -573,19 +562,25 @@ def main() -> None:
 
     args.allocation_path.parent.mkdir(parents=True, exist_ok=True)
     allocation_df.to_csv(args.allocation_path, index=False)
-    metrics_df.to_csv(args.metrics_path, index=False)
-
+    args.metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    append_metrics = args.metrics_path.exists() and args.metrics_path.stat().st_size > 0
+    metrics_df.to_csv(
+        args.metrics_path,
+        mode="a" if append_metrics else "w",
+        header=not append_metrics,
+        index=False,
+    )
     print("\nMetrics:")
     print(metrics_df[[
         "policy",
         "budget_used",
-        "mean_y_policy",
-        "success_rate_policy",
-        "true_gain_continuous_selected",
+        # "mean_y_policy",
+        # "success_rate_policy",
+        # "true_gain_continuous_selected",
         "true_gain_step_selected",
     ]])
     print(f"\nSaved allocations to {args.allocation_path}")
-    print(f"Saved metrics to {args.metrics_path}")
+    print(f"{'Appended' if append_metrics else 'Saved'} metrics to {args.metrics_path}")
 
     print((dfl_y1_hat > 0.6).mean())
     print((dfl_y0_hat > 0.6).mean())

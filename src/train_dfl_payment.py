@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import KFold
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -22,19 +22,20 @@ if str(SRC_DIR) not in sys.path:
 from models import OutcomeNetNoSigmoid, count_parameters  # noqa: E402
 
 
-SEED = 619
+SEED = 10
 DEFAULT_BATCH_SIZE = 256
 DEFAULT_LR = 1e-3
 DEFAULT_EPOCHS = 150
 DEFAULT_PATIENCE = 20
+DEFAULT_N_FOLDS = 5
 DEFAULT_HIDDEN_DIM = 64
 DEFAULT_DROPOUT = 0.1
 DEFAULT_THRESHOLD = 0.60
 DEFAULT_THRESHOLD_TEMPERATURE = 0.05
 DEFAULT_ALLOCATION_TEMPERATURE = 0.10
-DEFAULT_BUDGET_FRACTION = 0.20
+DEFAULT_BUDGET_FRACTION = 0.10
 DEFAULT_MSE_WEIGHT = 1.00
-DEFAULT_FAIRNESS_WEIGHT = 5.00
+DEFAULT_FAIRNESS_WEIGHT = 10.00
 DEFAULT_N_SMOOTHING_SAMPLES = 10
 DEFAULT_N_PERTURB_SAMPLES = 10
 DEFAULT_NOISE_STD = 0.10
@@ -45,7 +46,7 @@ DEFAULT_PG_FAIRNESS_WEIGHT = DEFAULT_FAIRNESS_WEIGHT
 DEFAULT_RANDOMIZE_BUDGET = True
 DEFAULT_BUDGET_FRACTION_MIN = 0.001
 DEFAULT_BUDGET_FRACTION_MAX = 0.10
-PG_ESTIMATORS = ["score_function", "forward", "backward", "central"]
+PG_ESTIMATORS = ["forward", "backward", "central"]
 MODEL_VARIANTS = ["dfl", "rs", "pg"]
 
 LossFn = Callable[
@@ -131,6 +132,29 @@ def make_loaders(
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
     return train_loader, val_loader, scaler
+
+
+def make_loader(
+    df: pd.DataFrame,
+    feature_cols: list[str],
+    batch_size: int,
+    shuffle: bool,
+) -> tuple[DataLoader, StandardScaler]:
+    x_unscaled_np = df[feature_cols].to_numpy(dtype=np.float32)
+    y_np = df["Y_obs"].to_numpy(dtype=np.float32)
+    group_np = df["group_B"].to_numpy(dtype=np.float32)
+
+    scaler = StandardScaler()
+    x_scaled_np = scaler.fit_transform(x_unscaled_np).astype(np.float32)
+
+    dataset = TensorDataset(
+        torch.from_numpy(x_scaled_np),
+        torch.from_numpy(x_unscaled_np),
+        torch.from_numpy(y_np),
+        torch.from_numpy(group_np),
+    )
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+    return loader, scaler
 
 
 def make_scaled_counterfactuals(
@@ -979,7 +1003,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fairness-weight", type=float, default=DEFAULT_FAIRNESS_WEIGHT)
     parser.add_argument("--payment-threshold", type=float, default=DEFAULT_THRESHOLD)
     parser.add_argument("--alpha", type=float, default=1.0)
-    parser.add_argument("--val-frac", type=float, default=0.15)
+    parser.add_argument("--n-folds", type=int, default=DEFAULT_N_FOLDS)
     parser.add_argument("--seed", type=int, default=SEED)
     # Additional arguments for variants
     parser.add_argument("--model-variant", choices=MODEL_VARIANTS, default="dfl")
@@ -996,6 +1020,50 @@ def parse_args() -> argparse.Namespace:
 
 
 # ==== Main Function With Multi-Variant Support ====
+
+def train_final_variant(
+    args: argparse.Namespace,
+    full_df: pd.DataFrame,
+    feature_cols: list[str],
+    device: torch.device,
+    n_epochs: int,
+    label: str,
+) -> tuple[OutcomeNetNoSigmoid, StandardScaler, dict[str, float]]:
+    set_seed(args.seed)
+
+    full_loader, scaler = make_loader(
+        df=full_df,
+        feature_cols=feature_cols,
+        batch_size=args.batch_size,
+        shuffle=True,
+    )
+    scaler_mean = torch.tensor(scaler.mean_, dtype=torch.float32, device=device)
+    scaler_scale = torch.tensor(scaler.scale_, dtype=torch.float32, device=device)
+
+    model = OutcomeNetNoSigmoid(
+        input_dim=len(feature_cols),
+        hidden_dim=args.hidden_dim,
+        dropout=args.dropout,
+    ).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+
+    final_logs: dict[str, float] = {}
+    print(f"[{label}] Retraining final model on all training data for {n_epochs} epochs.")
+    for _ in range(1, n_epochs + 1):
+        final_logs = train_one_epoch(
+            model=model,
+            loader=full_loader,
+            optimizer=optimizer,
+            device=device,
+            scaler_mean=scaler_mean,
+            scaler_scale=scaler_scale,
+            feature_cols=feature_cols,
+            args=args,
+        )
+
+    model.eval()
+    return model, scaler, final_logs
+
 
 def train_one_variant(args: argparse.Namespace, model_variant: str, pg_estimator: str | None = None) -> None:
     variant_args = argparse.Namespace(**vars(args))
@@ -1014,34 +1082,13 @@ def train_one_variant(args: argparse.Namespace, model_variant: str, pg_estimator
     print(f"Loaded {variant_args.data_path}: {df.shape}")
     print(f"Input dim: {len(feature_cols)}")
 
-    train_df, val_df = train_test_split(
-        df,
-        test_size=variant_args.val_frac,
-        random_state=variant_args.seed,
-        shuffle=True,
-        stratify=df["group"],
-    )
-    train_df = train_df.reset_index(drop=True)
-    val_df = val_df.reset_index(drop=True)
-
-    train_loader, val_loader, scaler = make_loaders(
-        train_df=train_df,
-        val_df=val_df,
-        feature_cols=feature_cols,
-        batch_size=variant_args.batch_size,
-    )
-
-    scaler_mean = torch.tensor(scaler.mean_, dtype=torch.float32, device=device)
-    scaler_scale = torch.tensor(scaler.scale_, dtype=torch.float32, device=device)
-
-    model = OutcomeNetNoSigmoid(
+    parameter_count_model = OutcomeNetNoSigmoid(
         input_dim=len(feature_cols),
         hidden_dim=variant_args.hidden_dim,
         dropout=variant_args.dropout,
-    ).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=variant_args.lr)
+    )
 
-    print(f"Trainable parameters: {count_parameters(model)}")
+    print(f"Trainable parameters per fold: {count_parameters(parameter_count_model)}")
     print(
         "Payment-budget settings: "
         f"variant={variant_args.model_variant}, "
@@ -1061,70 +1108,105 @@ def train_one_variant(args: argparse.Namespace, model_variant: str, pg_estimator
         f"fairness_weight={variant_args.fairness_weight}"
     )
 
-    best_val_loss = float("inf")
-    best_state = None
-    best_val_logs: dict[str, float] = {}
-    epochs_without_improvement = 0
+    kfold = KFold(n_splits=variant_args.n_folds, shuffle=True, random_state=variant_args.seed)
     summary_rows = []
+    fold_best_logs = []
 
-    for epoch in range(1, variant_args.epochs + 1):
-        train_logs = train_one_epoch(
-            model=model,
-            loader=train_loader,
-            optimizer=optimizer,
-            device=device,
-            scaler_mean=scaler_mean,
-            scaler_scale=scaler_scale,
+    for fold, (train_idx, val_idx) in enumerate(kfold.split(df), start=1):
+        fold_args = argparse.Namespace(**vars(variant_args))
+        fold_args.seed = variant_args.seed + fold
+        set_seed(fold_args.seed)
+
+        train_df = df.iloc[train_idx].reset_index(drop=True)
+        val_df = df.iloc[val_idx].reset_index(drop=True)
+        train_loader, val_loader, scaler = make_loaders(
+            train_df=train_df,
+            val_df=val_df,
             feature_cols=feature_cols,
-            args=variant_args,
+            batch_size=fold_args.batch_size,
         )
-        val_logs = evaluate_loss(
-            model=model,
-            loader=val_loader,
-            device=device,
-            scaler_mean=scaler_mean,
-            scaler_scale=scaler_scale,
-            feature_cols=feature_cols,
-            args=variant_args,
-        )
+        scaler_mean = torch.tensor(scaler.mean_, dtype=torch.float32, device=device)
+        scaler_scale = torch.tensor(scaler.scale_, dtype=torch.float32, device=device)
 
-        row = {"epoch": epoch, "model_variant": variant_args.model_variant, "pg_estimator": variant_args.pg_estimator}
-        row.update({f"train_{k}": v for k, v in train_logs.items()})
-        row.update({f"val_{k}": v for k, v in val_logs.items()})
-        summary_rows.append(row)
+        model = OutcomeNetNoSigmoid(
+            input_dim=len(feature_cols),
+            hidden_dim=fold_args.hidden_dim,
+            dropout=fold_args.dropout,
+        ).to(device)
+        optimizer = torch.optim.Adam(model.parameters(), lr=fold_args.lr)
 
-        val_loss = val_logs["loss"]
-        if val_loss < best_val_loss - 1e-8:
-            best_val_loss = val_loss
-            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-            best_val_logs = val_logs.copy()
-            best_val_logs["best_epoch"] = float(epoch)
-            best_val_logs["model_variant"] = variant_args.model_variant
-            best_val_logs["pg_estimator"] = variant_args.pg_estimator
-            epochs_without_improvement = 0
-        else:
-            epochs_without_improvement += 1
+        best_val_loss = float("inf")
+        best_val_logs: dict[str, float] = {}
+        epochs_without_improvement = 0
 
-        if epoch == 1 or epoch % 10 == 0:
-            val_obj = val_logs.get("incremental_objective_mean", val_logs.get("perturbed_objective_mean", 0.0))
-            val_cost = val_logs.get("realized_soft_cost", val_logs.get("realized_cost", val_logs.get("deterministic_cost", 0.0)))
-            print(
-                f"[{label}] Epoch {epoch:03d}: "
-                f"train_loss={train_logs['loss']:.5f}, "
-                f"val_loss={val_logs['loss']:.5f}, "
-                f"val_obj={val_obj:.5f}, "
-                f"val_policy_success={val_logs['policy_success_mean']:.5f}, "
-                f"val_mse={val_logs['mse_loss']:.5f}, "
-                f"val_budget={val_logs['batch_budget']:.5f}, "
-                f"val_cost={val_cost:.5f}"
+        for epoch in range(1, fold_args.epochs + 1):
+            train_logs = train_one_epoch(
+                model=model,
+                loader=train_loader,
+                optimizer=optimizer,
+                device=device,
+                scaler_mean=scaler_mean,
+                scaler_scale=scaler_scale,
+                feature_cols=feature_cols,
+                args=fold_args,
+            )
+            val_logs = evaluate_loss(
+                model=model,
+                loader=val_loader,
+                device=device,
+                scaler_mean=scaler_mean,
+                scaler_scale=scaler_scale,
+                feature_cols=feature_cols,
+                args=fold_args,
             )
 
-        if epochs_without_improvement >= variant_args.patience:
-            print(f"[{label}] Early stopping at epoch {epoch}.")
-            break
+            row = {
+                "fold": fold,
+                "epoch": epoch,
+                "model_variant": fold_args.model_variant,
+                "pg_estimator": fold_args.pg_estimator,
+            }
+            row.update({f"train_{k}": v for k, v in train_logs.items()})
+            row.update({f"val_{k}": v for k, v in val_logs.items()})
+            summary_rows.append(row)
 
-    if best_state is not None:
-        model.load_state_dict(best_state)
+            val_loss = val_logs["loss"]
+            if val_loss < best_val_loss - 1e-8:
+                best_val_loss = val_loss
+                best_val_logs = val_logs.copy()
+                best_val_logs["fold"] = float(fold)
+                best_val_logs["best_epoch"] = float(epoch)
+                best_val_logs["model_variant"] = fold_args.model_variant
+                best_val_logs["pg_estimator"] = fold_args.pg_estimator
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 1
+
+            if epoch == 1 or epoch % 10 == 0:
+                val_obj = val_logs.get("incremental_objective_mean", val_logs.get("perturbed_objective_mean", 0.0))
+                val_cost = val_logs.get("realized_soft_cost", val_logs.get("realized_cost", val_logs.get("deterministic_cost", 0.0)))
+                print(
+                    f"[{label} fold {fold}/{variant_args.n_folds}] Epoch {epoch:03d}: "
+                    f"train_loss={train_logs['loss']:.5f}, "
+                    f"val_loss={val_logs['loss']:.5f}, "
+                    f"val_obj={val_obj:.5f}, "
+                    f"val_policy_success={val_logs['policy_success_mean']:.5f}, "
+                    f"val_mse={val_logs['mse_loss']:.5f}, "
+                    f"val_budget={val_logs['batch_budget']:.5f}, "
+                    f"val_cost={val_cost:.5f}"
+                )
+
+            if epochs_without_improvement >= fold_args.patience:
+                print(f"[{label} fold {fold}/{variant_args.n_folds}] Early stopping at epoch {epoch}.")
+                break
+
+        fold_best_logs.append(best_val_logs)
+        print(
+            f"[{label} fold {fold}/{variant_args.n_folds}] "
+            f"best_epoch={best_val_logs['best_epoch']:.0f}, "
+            f"val_loss={best_val_logs['loss']:.5f}, "
+            f"val_mse={best_val_logs['mse_loss']:.5f}"
+        )
 
     suffix = variant_args.model_variant if variant_args.model_variant != "pg" else f"pg_{variant_args.pg_estimator}"
     output_path = variant_args.output_path.parent / f"payment_{suffix}_model.pt"
@@ -1133,28 +1215,53 @@ def train_one_variant(args: argparse.Namespace, model_variant: str, pg_estimator
     summary_df = pd.DataFrame(summary_rows)
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_df.to_csv(summary_path, index=False)
+
+    mean_best_epoch = int(round(float(np.mean([row["best_epoch"] for row in fold_best_logs]))))
+    final_epochs = max(1, mean_best_epoch)
+    final_model, final_scaler, final_train_logs = train_final_variant(
+        args=variant_args,
+        full_df=df,
+        feature_cols=feature_cols,
+        device=device,
+        n_epochs=final_epochs,
+        label=label,
+    )
+
+    checkpoint_logs = {
+        "cv_mean_best_epoch": float(np.mean([row["best_epoch"] for row in fold_best_logs])),
+        "cv_mean_val_loss": float(np.mean([row["loss"] for row in fold_best_logs])),
+        "cv_mean_val_mse_loss": float(np.mean([row["mse_loss"] for row in fold_best_logs])),
+        "n_folds": float(variant_args.n_folds),
+        "model_variant": variant_args.model_variant,
+        "pg_estimator": variant_args.pg_estimator,
+        "final_epochs": float(final_epochs),
+    }
+    checkpoint_logs.update({f"full_train_{k}": v for k, v in final_train_logs.items()})
+
     save_checkpoint(
-        model=model,
-        scaler=scaler,
+        model=final_model,
+        scaler=final_scaler,
         feature_cols=feature_cols,
         args=variant_args,
-        best_val_logs=best_val_logs,
+        best_val_logs=checkpoint_logs,
         output_path=output_path,
     )
 
     if variant_args.model_variant == "dfl":
         save_checkpoint(
-            model=model,
-            scaler=scaler,
+            model=final_model,
+            scaler=final_scaler,
             feature_cols=feature_cols,
             args=variant_args,
-            best_val_logs=best_val_logs,
+            best_val_logs=checkpoint_logs,
             output_path=variant_args.output_path,
         )
 
-    print(f"[{label}] Best validation logs:")
-    print(best_val_logs)
-    print(f"[{label}] Saved model to {output_path}")
+    print(f"[{label}] Cross-validation best logs:")
+    print(pd.DataFrame(fold_best_logs))
+    print(f"[{label}] Final full-data training logs:")
+    print(final_train_logs)
+    print(f"[{label}] Saved final full-data model to {output_path}")
     print(f"[{label}] Saved training summary to {summary_path}")
 
 
