@@ -1,212 +1,158 @@
 # Incentive Allocation: PTO and DFL
 
-This project simulates a treatment allocation problem and compares two neural
-approaches:
+This project simulates a treatment allocation problem and compares predict-then-optimize (PTO) against several decision-focused learning (DFL) variants. There are two allocation settings:
 
-- **PTO**, predict-then-optimize: learn an outcome model first, then solve a
-  top-budget allocation problem using predicted treatment effects.
-- **DFL**, decision-focused learning: train the same outcome architecture through
-  a differentiable surrogate of the downstream allocation objective.
+- **Cardinality / nudging:** allocate to a fixed number of users.
+- **Payment / knapsack:** allocate under an expected payment budget, where payment is triggered by crossing a wear threshold.
 
-The intended pipeline is:
+Run commands from the `project/` directory.
+
+## Pipeline
 
 ```bash
 python src/generate_data.py
 python src/train_pto.py
 python src/train_dfl.py
 python src/evaluate.py
+
+python src/train_dfl_payment.py --train-all-variants
+python src/evaluate_allocation.py
 ```
 
-Run these commands from the `project/` directory.
+## Data
 
-## Data Generation
-
-`src/generate_data.py` creates a simulated user population and writes:
+`src/generate_data.py` writes:
 
 - `data/train.csv`
 - `data/val.csv`
 - `data/test.csv`
 
-Each user has:
+Each row contains group label, five baseline covariates, 30 pre-intervention wear indicators, observed action `A_obs`, observed outcome `Y_obs`, and true potential outcomes `Y0_true`, `Y1_true`.
 
-- group label `A` or `B`
-- five covariates `x1` through `x5`
-- 30 pre-intervention binary wear indicators `pre_1` through `pre_30`
-- randomized observed treatment `A_obs`
-- observed outcome `Y_obs`
-- true potential outcomes `Y0_true` and `Y1_true`
+## Shared Model
 
-The post-intervention outcomes are generated from binary Markov chains. The
-baseline transition probabilities are heterogeneous by covariates and group, and
-treatment changes those transition probabilities through user-specific response
-parameters. The outcome `Y` is the average post-intervention wear rate, so
-`Y0_true` is the no-action outcome and `Y1_true` is the action outcome.
-
-## Model
-
-`src/models.py` defines the shared neural network structure used by PTO and DFL.
-The input feature vector is:
+All learned methods use the same feature vector:
 
 ```text
 [group_B, x1, ..., x5, pre_1, ..., pre_30, A_obs]
 ```
 
-This gives an input dimension of 37.
-
-The shared architecture is a two-hidden-layer MLP:
+This gives 37 input features. The shared architecture is a two-hidden-layer MLP:
 
 ```text
-Linear(input_dim, hidden_dim)
+Linear(input_dim, 64)
 ReLU
-Dropout
-Linear(hidden_dim, hidden_dim)
+Dropout(0.1)
+Linear(64, 64)
 ReLU
-Dropout
-Linear(hidden_dim, 1)
+Dropout(0.1)
+Linear(64, 1)
 ```
 
-`OutcomeNet` adds a final sigmoid and is used by PTO. `OutcomeNetNoSigmoid` uses
-the same structure without the final sigmoid and is used by DFL; DFL applies
-`torch.sigmoid` explicitly during training and evaluation.
+`OutcomeNet` includes a final sigmoid and is used by PTO. `OutcomeNetNoSigmoid` omits the final sigmoid and is used by DFL-family methods, which apply `torch.sigmoid` explicitly.
 
-## PTO: Predict Then Optimize
+## Training
 
-`src/train_pto.py` trains `OutcomeNet` to predict the observed outcome `Y_obs`
-from the observed action and user features.
+### PTO
 
-The supervised training objective is mean squared error:
+`src/train_pto.py` trains a supervised outcome model using MSE on `Y_obs`. It uses 5-fold cross-validation to select the number of epochs, then retrains a final model on all training data.
 
-```text
-min_theta (1/n) sum_i (f_theta(x_i, A_obs_i) - Y_obs_i)^2
-```
-
-The script uses K-fold cross-validation to choose a reasonable number of epochs,
-then retrains one final model on all training data. It writes:
+Outputs:
 
 - `outputs/pto_model.pt`
 - `outputs/pto_training_summary.csv`
 
-After training, PTO uses the model counterfactually:
+### Cardinality DFL
 
-```text
-y0_hat_i = f_theta(x_i, A=0)
-y1_hat_i = f_theta(x_i, A=1)
+`src/train_dfl.py` trains:
+
+- `dfl`
+- `rs`
+- `pg:forward`
+- `pg:backward`
+- `pg:central`
+
+The default `MODEL_VARIANTS` and `PG_ESTIMATORS` run all of these combinations:
+
+```bash
+python src/train_dfl.py
 ```
 
-`src/optimize.py` then solves the budgeted allocation problem. For utility
-function `u`, define each user's predicted gain:
+Each variant uses 5-fold cross-validation to select the epoch count, then retrains a final model on all training data.
 
-```text
-score_i = u(y1_hat_i) - u(y0_hat_i)
-```
-
-The default utility is the threshold success utility:
-
-```text
-u(y) = 1{y > 0.60}
-```
-
-The PTO allocation objective is:
-
-```text
-max_a sum_i a_i [u(y1_hat_i) - u(y0_hat_i)]
-subject to sum_i a_i <= B
-           a_i in {0, 1}
-           a_i = 0 if score_i <= 0  (default require_positive_score=True)
-```
-
-Because the objective is linear in the binary allocation, the optimizer selects
-the top `B` users with positive predicted scores. Ties are broken stably by user
-index.
-
-## DFL: Decision-Focused Learning
-
-`src/train_dfl.py` trains `OutcomeNetNoSigmoid` with a differentiable surrogate
-for the allocation objective.
-
-For each mini-batch, the same model is evaluated twice:
-
-```text
-y0_hat_i = sigmoid(f_theta(x_i, A=0))
-y1_hat_i = sigmoid(f_theta(x_i, A=1))
-```
-
-The hard threshold utility is replaced by a smooth approximation:
-
-```text
-s0_hat_i = sigmoid((y0_hat_i - threshold) / threshold_temperature)
-s1_hat_i = sigmoid((y1_hat_i - threshold) / threshold_temperature)
-score_i = s1_hat_i - s0_hat_i
-```
-
-The hard top-`B` allocation is replaced by a soft batch allocation:
-
-```text
-a_i = batch_budget * softmax(score_i / allocation_temperature)
-batch_budget = max(1, budget_fraction * batch_size)
-```
-
-The differentiable DFL decision objective is:
-
-```text
-max_theta sum_i a_i [s1_hat_i - s0_hat_i]
-```
-
-The implemented loss minimizes the negative mean decision objective plus optional
-regularizers:
-
-```text
-min_theta
-    - (1/m) sum_i a_i [s1_hat_i - s0_hat_i]
-    + mse_weight * (1/m) sum_i (sigmoid(f_theta(x_i, A_obs_i)) - Y_obs_i)^2
-    + fairness_weight * sum_g (r_g - r_overall)^2
-```
-
-Here `m` is the mini-batch size and `r_g` is the predicted soft-policy success
-rate for group `g`. The fairness term is available but defaults to zero.
-
-The DFL script writes:
+Main outputs:
 
 - `outputs/dfl_model.pt`
-- `outputs/dfl_training_summary.csv`
+- `outputs/rs_model.pt`
+- `outputs/pg_forward_model.pt`
+- `outputs/pg_backward_model.pt`
+- `outputs/pg_central_model.pt`
+- matching `*_training_summary.csv` files
+
+### Payment-Budget DFL
+
+`src/train_dfl_payment.py` trains the same DFL variants under an expected payment budget. Payment cost is modeled as:
+
+```text
+C_i = alpha * Y_i * 1{Y_i >= T}
+```
+
+Run all payment variants with:
+
+```bash
+python src/train_dfl_payment.py --train-all-variants
+```
+
+Like `train_dfl.py`, each payment variant uses 5-fold cross-validation for epoch selection and then retrains on all training data.
+
+Main outputs:
+
+- `outputs/payment_dfl_model.pt`
+- `outputs/payment_rs_model.pt`
+- `outputs/payment_pg_forward_model.pt`
+- `outputs/payment_pg_backward_model.pt`
+- `outputs/payment_pg_central_model.pt`
+- matching `payment_*_training_summary.csv` files
 
 ## Evaluation
 
-`src/evaluate.py` loads the PTO and DFL checkpoints, predicts counterfactual
-outcomes on `data/test.csv`, solves the same top-budget allocation for each
-model, and compares:
+### Cardinality Evaluation
 
-- `pto`
-- `dfl`
-- `oracle`
-- `random`
-- `no_action`
+`src/evaluate.py` compares PTO, DFL, RS, PG variants, oracle, random, and no-action policies on `data/test.csv`. It predicts counterfactual outcomes, solves the allocation rule, and appends metrics to:
 
-The oracle policy uses the true potential outcomes:
+- `outputs/test_metrics.csv`
 
-```text
-score_i^oracle = u(Y1_true_i) - u(Y0_true_i)
-```
-
-Evaluation reports:
-
-- budget used
-- mean policy outcome
-- policy success rate
-- true continuous gain among selected users
-- true threshold-success gain among selected users
-- group-level counts, selection rates, and success rates
-
-Outputs:
+It also writes the latest allocation table to:
 
 - `outputs/test_allocations.csv`
-- `outputs/test_metrics.csv`
+
+Example budget sweep:
+
+```bash
+for b in 7 15 75 150; do
+  python src/evaluate.py \
+    --budget "$b" \
+    --metrics-path outputs/test_metrics_budget_sweep.csv \
+    --allocation-path "outputs/test_allocations_budget_${b}.csv"
+done
+```
+
+### Payment Evaluation
+
+`src/evaluate_allocation.py` loads the payment-trained DFL models and records realized payment budget. It reports both:
+
+- `budget_used`: number of selected users
+- `actual_payment_budget_used`: realized payment cost, computed from true outcomes as `A_i * Y1_true_i * 1{Y1_true_i >= T}`
+
+It appends metrics to `--metrics-path` and reconciles columns if older metric files do not yet contain newer fields.
 
 ## Main Files
 
-- `src/generate_data.py`: simulate users, potential outcomes, and train/val/test splits
+- `src/generate_data.py`: simulate users, actions, observed outcomes, and potential outcomes
 - `src/models.py`: shared MLP architectures
-- `src/train_pto.py`: supervised outcome-model training for PTO
-- `src/optimize.py`: top-budget allocation utilities
-- `src/train_dfl.py`: decision-focused training objective
-- `src/evaluate.py`: test-set policy comparison
+- `src/train_pto.py`: supervised PTO outcome model
+- `src/train_dfl.py`: cardinality-budget DFL, RS, and PG training
+- `src/train_dfl_payment.py`: payment-budget DFL, RS, and PG training
+- `src/optimize.py`: top-B, fairness-aware, and payment-budget allocation utilities
+- `src/evaluate.py`: cardinality-policy evaluation
+- `src/evaluate_allocation.py`: payment-policy evaluation
